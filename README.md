@@ -110,8 +110,10 @@ provider_settings:
 | `enable_dialogue_flow` | 显示对话流（谁→谁） | `true` |
 | `only_group_chat` | 仅群聊生效 | `true` |
 | `experimental_silent_unrelated_active_block_send` | 🧪实验性：主动触发且对话与Bot无关时阻止发送（调用模型但不输出到群聊） | `false` |
+| `experimental_silent_unrelated_active_allow_probability` | 🧪实验性：静默命中场景的放行概率（0~1） | `0.5` |
 
-**实验性说明**：开启后，命中“主动触发 + 非对Bot说话”时会阻止 Bot 输出到群聊（模型仍会被调用）。  
+**实验性说明**：开启后，命中“主动触发 + 非对Bot说话”时，会按 `experimental_silent_unrelated_active_allow_probability` 进行随机放行。  
+`0` 表示总是拦截，`1` 表示总是放行，`0.5` 表示大约半数放行。  
 **注意**：该功能暂不支持流式输出；请先关闭流式输出。若开启流式，插件会自动跳过该功能并输出警告日志。  
 **兼容性**：此版本已将旧键 `experimental_silent_unrelated_active` 替换为新键 `experimental_silent_unrelated_active_block_send`（不兼容变更）。
 

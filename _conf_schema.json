@@ -41,6 +41,17 @@
     "default": false,
     "hint": "开启时请关闭流式输出；流式模式下本功能会自动跳过并输出警告日志。建议先小范围验证"
   },
+  "experimental_silent_unrelated_active_allow_probability": {
+    "description": "🧪实验性：静默命中场景的放行概率（0~1）",
+    "type": "float",
+    "default": 0.25,
+    "min": 0.0,
+    "max": 1.0,
+    "hint": "仅在 experimental_silent_unrelated_active_block_send 开启时生效。0=总拦截，1=总放行，0.5=半数放行。",
+    "condition": {
+      "experimental_silent_unrelated_active_block_send": true
+    }
+  },
   "debug_inference": {
     "description": "启用推断规则调试日志",
     "type": "bool",

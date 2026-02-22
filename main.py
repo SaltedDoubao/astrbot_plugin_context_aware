@@ -1,5 +1,5 @@
 """
-AstrBot 上下文场景感知增强插件 v3.3.0 (Context-Aware Enhancement)
+AstrBot 上下文场景感知增强插件 v3.1.1 (Context-Aware Enhancement)
 
 为 LLM 提供结构化的群聊场景描述，增强其对对话情境的理解能力。
 重点解决：主动回复时 Bot 误以为别人在问自己的问题。
@@ -15,14 +15,6 @@ AstrBot 上下文场景感知增强插件 v3.3.0 (Context-Aware Enhancement)
 - 只做加法，不修改框架原有信息
 - 可完全替代框架内置 LTM 的群聊记录功能
 - 轻量高效，图像转述为可选功能
-
-v3.3.0 更新:
-- [FEATURE] 真静默重构：主动触发且对话与 Bot 无关时，调用模型但阻止发送到群聊
-- [CHANGE] 实验性开关键名替换为 experimental_silent_unrelated_active_block_send（不兼容）
-- [CHANGE] 流式输出场景自动跳过该功能并输出警告日志
-
-v3.2.0 更新:
-- [FEATURE] 新增实验性静默拦截：主动触发且对话与 Bot 无关时，停止 LLM 请求并不发送回复
 
 v3.1.1 更新:
 - [FIX] 修复 SessionState 字段重复定义问题
@@ -47,12 +39,13 @@ v2.5.1 更新:
 - 戳一戳时正确显示戳一戳用户信息
 
 Author: 木有知
-Version: 3.3.0
+Version: 3.1.1
 """
 
 from __future__ import annotations
 
 import asyncio
+import random
 import re
 import time
 import uuid
@@ -944,6 +937,19 @@ class Main(star.Star):
         self._experimental_silent_unrelated_active_block_send = self._cfg_bool(
             "experimental_silent_unrelated_active_block_send", False
         )
+        self._experimental_silent_unrelated_active_allow_probability = self._cfg_float(
+            "experimental_silent_unrelated_active_allow_probability", 0.5
+        )
+        if self._experimental_silent_unrelated_active_allow_probability < 0.0:
+            logger.warning(
+                "[ContextAware] experimental_silent_unrelated_active_allow_probability < 0，已回退为 0.0"
+            )
+            self._experimental_silent_unrelated_active_allow_probability = 0.0
+        elif self._experimental_silent_unrelated_active_allow_probability > 1.0:
+            logger.warning(
+                "[ContextAware] experimental_silent_unrelated_active_allow_probability > 1，已回退为 1.0"
+            )
+            self._experimental_silent_unrelated_active_allow_probability = 1.0
 
         # 图像转述配置
         self._image_caption_enabled = self._cfg_bool("image_caption", False)
@@ -983,7 +989,7 @@ class Main(star.Star):
         self._image_caption_errors = 0
         self._image_caption_cache_hits = 0
 
-        version = "3.3.0"
+        version = "3.1.1"
         caption_status = "已启用" if self._image_caption_enabled else "未启用"
         logger.info(f"[ContextAware] 插件 v{version} 已加载 | 图像转述: {caption_status}")
 
@@ -1009,6 +1015,16 @@ class Main(star.Star):
         if val is None:
             return default
         return bool(val)
+
+    def _cfg_float(self, key: str, default: float) -> float:
+        """获取浮点配置项"""
+        val = self._cfg(key, default)
+        if val is None:
+            return default
+        try:
+            return float(val)
+        except (TypeError, ValueError):
+            return default
 
     def _cfg_list(self, key: str, default: list[str] | None = None) -> list[str]:
         """获取列表配置项（v3.0.0）"""
@@ -1049,15 +1065,26 @@ class Main(star.Star):
             return False
         return True
 
-    def _should_block_send_unrelated_active(
+    def _decide_block_send_unrelated_active(
         self, trigger_type: str, current: MessageRecord
-    ) -> bool:
-        """实验性真静默策略：主动触发且当前消息并非对 Bot 说话时，阻止最终发送。"""
+    ) -> tuple[bool, bool, float | None]:
+        """返回 (是否候选场景, 是否拦截, 随机值)。"""
         if not self._experimental_silent_unrelated_active_block_send:
-            return False
+            return False, False, None
         if trigger_type != TRIGGER_ACTIVE:
-            return False
-        return current.talking_to != "bot"
+            return False, False, None
+        if current.talking_to == "bot":
+            return False, False, None
+
+        p = self._experimental_silent_unrelated_active_allow_probability
+        if p <= 0.0:
+            return True, True, None
+        if p >= 1.0:
+            return True, False, None
+
+        rv = random.random()
+        allow = rv < p
+        return True, (not allow), rv
 
     @staticmethod
     def _normalize_current_for_explicit_trigger(
@@ -1525,19 +1552,34 @@ class Main(star.Star):
                     "[ContextAware] 检测到流式输出已开启，已跳过实验性真静默功能。"
                     "如需启用，请先关闭流式输出。"
                 )
-            elif self._should_block_send_unrelated_active(trigger_type, current):
-                talking_to_display = (
-                    "群聊" if current.talking_to == "group" else current.talking_to_name
+            else:
+                is_candidate, should_block, rv = self._decide_block_send_unrelated_active(
+                    trigger_type, current
                 )
-                logger.info(
-                    "[ContextAware] 🧪实验性真静默已命中（将阻止发送） | "
-                    f"触发: {TRIGGER_NAMES.get(trigger_type, trigger_type)} | "
-                    f"{current.sender_name} → {talking_to_display}"
-                )
-                try:
-                    event.set_extra(ExtraKeys.BLOCK_SEND_UNRELATED_ACTIVE, True)
-                except Exception:
-                    pass
+                if is_candidate:
+                    talking_to_display = (
+                        "群聊" if current.talking_to == "group" else current.talking_to_name
+                    )
+                    p = self._experimental_silent_unrelated_active_allow_probability
+                    if should_block:
+                        logger.info(
+                            "[ContextAware] 🧪实验性真静默命中并拦截 | "
+                            f"触发: {TRIGGER_NAMES.get(trigger_type, trigger_type)} | "
+                            f"{current.sender_name} → {talking_to_display} | "
+                            f"放行概率: {p:.2f}"
+                            + (f" | 随机值: {rv:.4f}" if rv is not None else "")
+                        )
+                    else:
+                        logger.debug(
+                            "[ContextAware] 🧪实验性真静默命中但放行 | "
+                            f"{current.sender_name} → {talking_to_display} | "
+                            f"放行概率: {p:.2f}"
+                            + (f" | 随机值: {rv:.4f}" if rv is not None else "")
+                        )
+                    try:
+                        event.set_extra(ExtraKeys.BLOCK_SEND_UNRELATED_ACTIVE, should_block)
+                    except Exception:
+                        pass
 
             # 可选：压缩历史（会裁剪 flow_source 对应的底层会话）
             snapshot2 = await self._maybe_compress_history(umo, snapshot)
