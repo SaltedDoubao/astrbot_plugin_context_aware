@@ -1,5 +1,5 @@
 """
-AstrBot 上下文场景感知增强插件 v3.1.1 (Context-Aware Enhancement)
+AstrBot 上下文场景感知增强插件 v3.2.0 (Context-Aware Enhancement)
 
 为 LLM 提供结构化的群聊场景描述，增强其对对话情境的理解能力。
 重点解决：主动回复时 Bot 误以为别人在问自己的问题。
@@ -15,6 +15,9 @@ AstrBot 上下文场景感知增强插件 v3.1.1 (Context-Aware Enhancement)
 - 只做加法，不修改框架原有信息
 - 可完全替代框架内置 LTM 的群聊记录功能
 - 轻量高效，图像转述为可选功能
+
+v3.2.0 更新:
+- [FEATURE] 新增实验性静默拦截：主动触发且对话与 Bot 无关时，停止 LLM 请求并不发送回复
 
 v3.1.1 更新:
 - [FIX] 修复 SessionState 字段重复定义问题
@@ -39,7 +42,7 @@ v2.5.1 更新:
 - 戳一戳时正确显示戳一戳用户信息
 
 Author: 木有知
-Version: 3.1.1
+Version: 3.2.0
 """
 
 from __future__ import annotations
@@ -78,6 +81,7 @@ class ExtraKeys:
     ACTIVE_TRIGGER: Final[str] = "_active_trigger"
     ACTIVE_REPLY_TRIGGERED: Final[str] = "active_reply_triggered"
     CURRENT_MESSAGE_RECORD: Final[str] = "_context_aware_current_message_record"
+    SILENCED_UNRELATED: Final[str] = "_context_aware_silenced_unrelated_active"
     
     # 场景注入标记，防止重复注入
     SCENE_INJECTED_MARKER: Final[str] = "<!-- context_aware_scene_v3 -->"
@@ -932,6 +936,9 @@ class Main(star.Star):
 
         self._enabled = self._cfg_bool("enable", True)
         self._group_only = self._cfg_bool("only_group_chat", True)
+        self._experimental_silent_unrelated_active = self._cfg_bool(
+            "experimental_silent_unrelated_active", False
+        )
 
         # 图像转述配置
         self._image_caption_enabled = self._cfg_bool("image_caption", False)
@@ -971,7 +978,7 @@ class Main(star.Star):
         self._image_caption_errors = 0
         self._image_caption_cache_hits = 0
 
-        version = "3.1.1"
+        version = "3.2.0"
         caption_status = "已启用" if self._image_caption_enabled else "未启用"
         logger.info(f"[ContextAware] 插件 v{version} 已加载 | 图像转述: {caption_status}")
 
@@ -1036,6 +1043,16 @@ class Main(star.Star):
         if self._group_only and event.is_private_chat():
             return False
         return True
+
+    def _should_silence_unrelated_active(
+        self, trigger_type: str, current: MessageRecord
+    ) -> bool:
+        """实验性静默策略：主动触发且当前消息并非对 Bot 说话时，直接静默。"""
+        if not self._experimental_silent_unrelated_active:
+            return False
+        if trigger_type != TRIGGER_ACTIVE:
+            return False
+        return current.talking_to != "bot"
 
     def _ensure_initialized(self, event: AstrMessageEvent) -> bool:
         """确保组件已初始化"""
@@ -1439,7 +1456,25 @@ class Main(star.Star):
                         flow_source = flow_source[: idx + 1]
                 except Exception:
                     pass
-                
+
+            trigger_type, trigger_desc = self._analyzer.detect_trigger(event, current)
+
+            if self._should_silence_unrelated_active(trigger_type, current):
+                talking_to_display = (
+                    "群聊" if current.talking_to == "group" else current.talking_to_name
+                )
+                logger.info(
+                    "[ContextAware] 🧪实验性静默拦截已生效 | "
+                    f"触发: {TRIGGER_NAMES.get(trigger_type, trigger_type)} | "
+                    f"{current.sender_name} → {talking_to_display}"
+                )
+                try:
+                    event.set_extra(ExtraKeys.SILENCED_UNRELATED, True)
+                except Exception:
+                    pass
+                event.stop_event()
+                return
+
             # 可选：压缩历史（会裁剪 flow_source 对应的底层会话）
             snapshot2 = await self._maybe_compress_history(umo, snapshot)
             if snapshot2 is not snapshot:
@@ -1455,8 +1490,6 @@ class Main(star.Star):
                             flow_source = flow_source[: idx2 + 1]
                     except Exception:
                         pass
-
-            trigger_type, trigger_desc = self._analyzer.detect_trigger(event, current)
 
             window = self._cfg_int("dialogue_window", 8)
             flow = flow_source[-window:] if window > 0 else flow_source
@@ -1512,6 +1545,11 @@ class Main(star.Star):
     ) -> None:
         """记录 Bot 回复"""
         if not self._should_process(event):
+            return
+
+        # 防御性兜底：若已命中实验性静默标记，不做任何记录
+        if event.get_extra(ExtraKeys.SILENCED_UNRELATED, False):
+            logger.debug("[ContextAware] 检测到实验性静默标记，跳过 Bot 回复记录")
             return
 
         if not resp.completion_text:

@@ -12,6 +12,11 @@ help: |
   - Bot状态：上次发言时间
   - 图像转述：可选功能，将群友发送的图片转为文字描述
 
+  v3.2.0 更新：
+  - 新增实验性开关：主动触发且对话与 Bot 无关时静默拦截
+  - 命中后直接停止 LLM 请求，不输出到群聊
+  - 增加静默标记兜底，避免未来框架链路变化带来的漏拦截
+
   v3.0.0 重大更新（精品重构）：
   - [CRITICAL] 修复并发竞态：SessionManager 添加异步锁 + deque 自动裁剪
   - [HIGH] 图像转述优化：并发限流(Semaphore) + 超时控制 + URL缓存
@@ -50,6 +55,6 @@ help: |
   - v3.0.0: 并发安全、高性能、可观测
 
   配置说明请查看插件配置页面。
-version: 3.1.1
+version: 3.2.0
 author: 木有知
 repo: https://github.com/muyouzhi6/astrbot_plugin_context_aware

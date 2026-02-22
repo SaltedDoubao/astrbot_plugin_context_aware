@@ -35,6 +35,12 @@
     "type": "bool",
     "default": true
   },
+  "experimental_silent_unrelated_active": {
+    "description": "🧪实验性：主动触发且对话与Bot无关时静默（不请求模型、不发送回复）",
+    "type": "bool",
+    "default": false,
+    "hint": "可能误拦截边界场景，建议先在小范围群聊验证后再长期开启"
+  },
   "debug_inference": {
     "description": "启用推断规则调试日志",
     "type": "bool",

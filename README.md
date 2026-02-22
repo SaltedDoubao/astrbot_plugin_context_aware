@@ -109,6 +109,9 @@ provider_settings:
 | `dialogue_window` | 注入 LLM 的对话流条数 | `8` |
 | `enable_dialogue_flow` | 显示对话流（谁→谁） | `true` |
 | `only_group_chat` | 仅群聊生效 | `true` |
+| `experimental_silent_unrelated_active` | 🧪实验性：主动触发且对话与Bot无关时静默（不请求模型、不发送回复） | `false` |
+
+**实验性说明**：开启后，命中“主动触发 + 非对Bot说话”时会直接静默，Bot 不会输出到群聊。建议先小范围验证。
 
 ### 图像转述配置
 
