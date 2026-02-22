@@ -1,5 +1,5 @@
 """
-AstrBot 上下文场景感知增强插件 v3.2.0 (Context-Aware Enhancement)
+AstrBot 上下文场景感知增强插件 v3.3.0 (Context-Aware Enhancement)
 
 为 LLM 提供结构化的群聊场景描述，增强其对对话情境的理解能力。
 重点解决：主动回复时 Bot 误以为别人在问自己的问题。
@@ -15,6 +15,11 @@ AstrBot 上下文场景感知增强插件 v3.2.0 (Context-Aware Enhancement)
 - 只做加法，不修改框架原有信息
 - 可完全替代框架内置 LTM 的群聊记录功能
 - 轻量高效，图像转述为可选功能
+
+v3.3.0 更新:
+- [FEATURE] 真静默重构：主动触发且对话与 Bot 无关时，调用模型但阻止发送到群聊
+- [CHANGE] 实验性开关键名替换为 experimental_silent_unrelated_active_block_send（不兼容）
+- [CHANGE] 流式输出场景自动跳过该功能并输出警告日志
 
 v3.2.0 更新:
 - [FEATURE] 新增实验性静默拦截：主动触发且对话与 Bot 无关时，停止 LLM 请求并不发送回复
@@ -42,7 +47,7 @@ v2.5.1 更新:
 - 戳一戳时正确显示戳一戳用户信息
 
 Author: 木有知
-Version: 3.2.0
+Version: 3.3.0
 """
 
 from __future__ import annotations
@@ -81,7 +86,7 @@ class ExtraKeys:
     ACTIVE_TRIGGER: Final[str] = "_active_trigger"
     ACTIVE_REPLY_TRIGGERED: Final[str] = "active_reply_triggered"
     CURRENT_MESSAGE_RECORD: Final[str] = "_context_aware_current_message_record"
-    SILENCED_UNRELATED: Final[str] = "_context_aware_silenced_unrelated_active"
+    BLOCK_SEND_UNRELATED_ACTIVE: Final[str] = "_context_aware_block_send_unrelated_active"
     
     # 场景注入标记，防止重复注入
     SCENE_INJECTED_MARKER: Final[str] = "<!-- context_aware_scene_v3 -->"
@@ -936,8 +941,8 @@ class Main(star.Star):
 
         self._enabled = self._cfg_bool("enable", True)
         self._group_only = self._cfg_bool("only_group_chat", True)
-        self._experimental_silent_unrelated_active = self._cfg_bool(
-            "experimental_silent_unrelated_active", False
+        self._experimental_silent_unrelated_active_block_send = self._cfg_bool(
+            "experimental_silent_unrelated_active_block_send", False
         )
 
         # 图像转述配置
@@ -978,7 +983,7 @@ class Main(star.Star):
         self._image_caption_errors = 0
         self._image_caption_cache_hits = 0
 
-        version = "3.2.0"
+        version = "3.3.0"
         caption_status = "已启用" if self._image_caption_enabled else "未启用"
         logger.info(f"[ContextAware] 插件 v{version} 已加载 | 图像转述: {caption_status}")
 
@@ -1044,11 +1049,11 @@ class Main(star.Star):
             return False
         return True
 
-    def _should_silence_unrelated_active(
+    def _should_block_send_unrelated_active(
         self, trigger_type: str, current: MessageRecord
     ) -> bool:
-        """实验性静默策略：主动触发且当前消息并非对 Bot 说话时，直接静默。"""
-        if not self._experimental_silent_unrelated_active:
+        """实验性真静默策略：主动触发且当前消息并非对 Bot 说话时，阻止最终发送。"""
+        if not self._experimental_silent_unrelated_active_block_send:
             return False
         if trigger_type != TRIGGER_ACTIVE:
             return False
@@ -1415,9 +1420,21 @@ class Main(star.Star):
             await self._sessions.add_message_async(umo, msg)
 
         try:
+            try:
+                # 每次请求先清理标记，避免后续链路读取到历史值
+                event.set_extra(ExtraKeys.BLOCK_SEND_UNRELATED_ACTIVE, False)
+            except Exception:
+                pass
+
             snapshot = await self._sessions.get_snapshot_async(umo)
             if not snapshot.messages:
                 return
+
+            # 防御性默认值：避免未来分支调整导致局部变量未赋值
+            current = snapshot.messages[-1]
+            flow_source = snapshot.messages
+            trigger_type = TRIGGER_UNKNOWN
+            trigger_desc = "触发原因未知"
 
             # 检查是否为戳一戳触发
             is_poke_trigger = bool(event.get_extra(ExtraKeys.POKE_TRIGGER))
@@ -1457,23 +1474,34 @@ class Main(star.Star):
                 except Exception:
                     pass
 
-            trigger_type, trigger_desc = self._analyzer.detect_trigger(event, current)
+            try:
+                trigger_type, trigger_desc = self._analyzer.detect_trigger(event, current)
+            except Exception as e:
+                logger.warning(f"[ContextAware] 触发类型检测失败，已降级为 unknown: {e}")
+                trigger_type, trigger_desc = TRIGGER_UNKNOWN, "触发原因未知"
 
-            if self._should_silence_unrelated_active(trigger_type, current):
+            # 实验性真静默：仅打标记，不中断 LLM 请求（避免“伪静默”文本）
+            # 流式输出场景暂不支持，跳过并告警
+            stream_extra = event.get_extra("enable_streaming")
+            is_streaming_enabled = bool(stream_extra) if stream_extra is not None else False
+            if self._experimental_silent_unrelated_active_block_send and is_streaming_enabled:
+                logger.warning(
+                    "[ContextAware] 检测到流式输出已开启，已跳过实验性真静默功能。"
+                    "如需启用，请先关闭流式输出。"
+                )
+            elif self._should_block_send_unrelated_active(trigger_type, current):
                 talking_to_display = (
                     "群聊" if current.talking_to == "group" else current.talking_to_name
                 )
                 logger.info(
-                    "[ContextAware] 🧪实验性静默拦截已生效 | "
+                    "[ContextAware] 🧪实验性真静默已命中（将阻止发送） | "
                     f"触发: {TRIGGER_NAMES.get(trigger_type, trigger_type)} | "
                     f"{current.sender_name} → {talking_to_display}"
                 )
                 try:
-                    event.set_extra(ExtraKeys.SILENCED_UNRELATED, True)
+                    event.set_extra(ExtraKeys.BLOCK_SEND_UNRELATED_ACTIVE, True)
                 except Exception:
                     pass
-                event.stop_event()
-                return
 
             # 可选：压缩历史（会裁剪 flow_source 对应的底层会话）
             snapshot2 = await self._maybe_compress_history(umo, snapshot)
@@ -1539,7 +1567,7 @@ class Main(star.Star):
         except Exception as e:
             logger.error(f"[ContextAware] 场景分析失败: {e}")
 
-    @filter.on_llm_response()
+    @filter.on_llm_response(priority=10)
     async def on_llm_response(
         self, event: AstrMessageEvent, resp: LLMResponse
     ) -> None:
@@ -1547,9 +1575,10 @@ class Main(star.Star):
         if not self._should_process(event):
             return
 
-        # 防御性兜底：若已命中实验性静默标记，不做任何记录
-        if event.get_extra(ExtraKeys.SILENCED_UNRELATED, False):
-            logger.debug("[ContextAware] 检测到实验性静默标记，跳过 Bot 回复记录")
+        # 真静默拦截：API 已调用，但命中规则时阻止最终输出到群聊
+        if event.get_extra(ExtraKeys.BLOCK_SEND_UNRELATED_ACTIVE, False):
+            event.stop_event()
+            logger.info("[ContextAware] 🧪实验性真静默已生效：已阻止本次 Bot 输出到群聊")
             return
 
         if not resp.completion_text:
