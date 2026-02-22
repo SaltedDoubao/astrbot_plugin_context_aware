@@ -1059,6 +1059,16 @@ class Main(star.Star):
             return False
         return current.talking_to != "bot"
 
+    @staticmethod
+    def _normalize_current_for_explicit_trigger(
+        trigger_type: str,
+        current: MessageRecord,
+    ) -> None:
+        """显式唤醒场景下统一当前消息对象，避免触发类型与 talking_to 相互矛盾。"""
+        if trigger_type in (TRIGGER_AT, TRIGGER_REPLY, TRIGGER_WAKE, TRIGGER_PRIVATE):
+            current.talking_to = "bot"
+            current.talking_to_name = "你"
+
     def _ensure_initialized(self, event: AstrMessageEvent) -> bool:
         """确保组件已初始化"""
         if self._analyzer is not None:
@@ -1456,11 +1466,34 @@ class Main(star.Star):
                 flow_source = snapshot.messages
             else:
                 current_from_extra = event.get_extra(ExtraKeys.CURRENT_MESSAGE_RECORD, None)
-                current = (
-                    current_from_extra
-                    if isinstance(current_from_extra, MessageRecord)
-                    else snapshot.messages[-1]
-                )
+                if isinstance(current_from_extra, MessageRecord):
+                    current = current_from_extra
+                else:
+                    # 优先按当前事件 message_id 在快照中回找，避免误取“最后一条 Bot 消息”
+                    event_msg_id = ""
+                    try:
+                        event_msg_id = str(event.message_obj.message_id)
+                    except Exception:
+                        event_msg_id = ""
+
+                    matched_current = None
+                    if event_msg_id:
+                        matched_current = next(
+                            (m for m in reversed(snapshot.messages) if m.msg_id == event_msg_id),
+                            None,
+                        )
+
+                    if matched_current is not None:
+                        current = matched_current
+                    else:
+                        # 兜底：从当前事件重新提取消息并重算 talking_to，避免上下文错绑到 Bot 历史消息
+                        current = await self._extract_message_with_caption(event)
+                        self._analyzer.infer_addressee(
+                            current,
+                            snapshot.messages,
+                            bot_replied_to=snapshot.bot_last_replied_to,
+                            bot_replied_to_name=snapshot.bot_last_replied_to_name,
+                        )
 
                 # 并发保护：flow 只截取到 current 为止，避免把其他并发消息带进来
                 flow_source = snapshot.messages
@@ -1479,6 +1512,9 @@ class Main(star.Star):
             except Exception as e:
                 logger.warning(f"[ContextAware] 触发类型检测失败，已降级为 unknown: {e}")
                 trigger_type, trigger_desc = TRIGGER_UNKNOWN, "触发原因未知"
+
+            # 触发是显式唤醒时，强制将 current 视为对 Bot 说话，避免“唤醒词 + talking_to=群聊”冲突
+            self._normalize_current_for_explicit_trigger(trigger_type, current)
 
             # 实验性真静默：仅打标记，不中断 LLM 请求（避免“伪静默”文本）
             # 流式输出场景暂不支持，跳过并告警
