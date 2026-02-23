@@ -36,18 +36,18 @@
     "default": true
   },
   "experimental_silent_unrelated_active_block_send": {
-    "description": "🧪实验性：主动触发且对话与Bot无关时阻止发送（调用模型但不输出到群聊）",
+    "description": "⚠️实验性功能：主动触发且对话与Bot无关时阻止发送（调用模型但不输出到群聊）",
     "type": "bool",
     "default": false,
-    "hint": "开启时请关闭流式输出；流式模式下本功能会自动跳过并输出警告日志。建议先小范围验证"
+    "hint": "开启时请关闭流式输出；流式模式下本功能会自动跳过并输出警告日志。"
   },
   "experimental_silent_unrelated_active_allow_probability": {
-    "description": "🧪实验性：静默命中场景的放行概率（0~1）",
+    "description": "⚠️实验性功能：静默命中场景的放行概率（0~1）",
     "type": "float",
-    "default": 0.25,
+    "default": 0.5,
     "min": 0.0,
     "max": 1.0,
-    "hint": "仅在 experimental_silent_unrelated_active_block_send 开启时生效。0=总拦截，1=总放行，0.5=半数放行。",
+    "hint": "仅在 experimental_silent_unrelated_active_block_send 开启时生效。",
     "condition": {
       "experimental_silent_unrelated_active_block_send": true
     }
